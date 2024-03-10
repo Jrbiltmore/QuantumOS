@@ -6,84 +6,88 @@
 #include <pthread.h>
 #include <time.h>
 
-#define MAX_TASKS 10
+#define MAX_TASKS 100
 
-typedef struct Task {
-    int taskID;
-    void (*taskFunction)(void*);
-    void* taskArgs;
-    time_t scheduledTime;
+typedef struct {
+    int taskId;
+    void (*function)(void *);
+    void *args;
+    time_t executeAt;
+    int repeat; // 0 = no repeat, >0 = repeat interval in seconds
 } Task;
 
 Task taskQueue[MAX_TASKS];
-pthread_mutex_t queueMutex;
+pthread_mutex_t taskQueueMutex = PTHREAD_MUTEX_INITIALIZER;
+pthread_cond_t taskQueueCond = PTHREAD_COND_INITIALIZER;
+int schedulerRunning = 1;
 
-void initialize_scheduler() {
-    pthread_mutex_init(&queueMutex, NULL);
-    for (int i = 0; i < MAX_TASKS; i++) {
-        taskQueue[i].taskID = -1; // Indicates that the task slot is empty
-    }
-    printf("Scheduler initialized.\n");
-}
-
-int schedule_task(void (*taskFunction)(void*), void* args, time_t runAt) {
-    pthread_mutex_lock(&queueMutex);
-    for (int i = 0; i < MAX_TASKS; i++) {
-        if (taskQueue[i].taskID == -1) {
-            taskQueue[i].taskID = i;
-            taskQueue[i].taskFunction = taskFunction;
-            taskQueue[i].taskArgs = args;
-            taskQueue[i].scheduledTime = runAt;
-            pthread_mutex_unlock(&queueMutex);
-            printf("Task %d scheduled.\n", i);
-            return i;
-        }
-    }
-    pthread_mutex_unlock(&queueMutex);
-    printf("Failed to schedule task. Task queue is full.\n");
-    return -1;
-}
-
-void execute_tasks() {
-    while (1) {
-        pthread_mutex_lock(&queueMutex);
+void* scheduler_loop(void* arg) {
+    while (schedulerRunning) {
+        pthread_mutex_lock(&taskQueueMutex);
         time_t now = time(NULL);
         for (int i = 0; i < MAX_TASKS; i++) {
-            if (taskQueue[i].taskID != -1 && taskQueue[i].scheduledTime <= now) {
-                taskQueue[i].taskFunction(taskQueue[i].taskArgs);
-                taskQueue[i].taskID = -1; // Mark as executed
-                printf("Task %d executed.\n", i);
+            if (taskQueue[i].function && taskQueue[i].executeAt <= now) {
+                taskQueue[i].function(taskQueue[i].args);
+                if (taskQueue[i].repeat > 0) {
+                    taskQueue[i].executeAt = now + taskQueue[i].repeat;
+                } else {
+                    taskQueue[i].function = NULL; // Mark task as done
+                }
             }
         }
-        pthread_mutex_unlock(&queueMutex);
-        sleep(1); // Polling interval
+        pthread_cond_wait(&taskQueueCond, &taskQueueMutex); // Wait for next task or new task
+        pthread_mutex_unlock(&taskQueueMutex);
     }
+    return NULL;
 }
 
-void cleanup_scheduler() {
-    pthread_mutex_destroy(&queueMutex);
-    printf("Scheduler cleanup complete.\n");
+void initialize_scheduler() {
+    for (int i = 0; i < MAX_TASKS; i++) {
+        taskQueue[i].taskId = -1;
+    }
+    pthread_t schedulerThread;
+    pthread_create(&schedulerThread, NULL, scheduler_loop, NULL);
+    printf("Scheduler initialized and running.\n");
 }
 
-// Example task function
-void exampleTask(void* arg) {
-    printf("Executing example task with arg: %s\n", (char*)arg);
+void add_task(void (*function)(void *), void *args, time_t executeAt, int repeat) {
+    pthread_mutex_lock(&taskQueueMutex);
+    for (int i = 0; i < MAX_TASKS; i++) {
+        if (!taskQueue[i].function) {
+            taskQueue[i].taskId = i;
+            taskQueue[i].function = function;
+            taskQueue[i].args = args;
+            taskQueue[i].executeAt = executeAt;
+            taskQueue[i].repeat = repeat;
+            printf("Task %d added.\n", i);
+            pthread_cond_signal(&taskQueueCond);
+            break;
+        }
+    }
+    pthread_mutex_unlock(&taskQueueMutex);
+}
+
+void shutdown_scheduler() {
+    schedulerRunning = 0; // Stop scheduler loop
+    pthread_cond_broadcast(&taskQueueCond); // Wake up scheduler to exit
+    printf("Scheduler shutting down.\n");
+}
+
+// Example function to be executed by a task
+void example_task_function(void *arg) {
+    printf("Example task executed with argument: %s\n", (char *)arg);
 }
 
 int main() {
     initialize_scheduler();
-    time_t now = time(NULL);
-    schedule_task(exampleTask, "Task argument", now + 5); // Schedule to run 5 seconds from now
 
-    // Start a thread to execute tasks
-    pthread_t execThread;
-    pthread_create(&execThread, NULL, (void*)execute_tasks, NULL);
-    
-    // Simulate running for some time
-    sleep(10);
-    
-    cleanup_scheduler();
-    pthread_cancel(execThread);
-    pthread_join(execThread, NULL);
+    time_t now = time(NULL);
+    add_task(example_task_function, "Task 1", now + 5, 0); // Execute once after 5 seconds
+    add_task(example_task_function, "Task 2", now + 10, 5); // Execute every 5 seconds
+
+    // Keep the main thread running for a while to see tasks being executed
+    sleep(30);
+
+    shutdown_scheduler();
     return 0;
 }
